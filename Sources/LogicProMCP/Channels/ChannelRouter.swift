@@ -31,9 +31,9 @@ actor ChannelRouter {
 
         // Track mutation — AX click, fallback to keyboard
         "track.select":               [.accessibility, .cgEvent],
-        "track.create_audio":         [.cgEvent, .accessibility],
-        "track.create_instrument":    [.cgEvent, .accessibility],
-        "track.create_drummer":       [.cgEvent, .accessibility],
+        "track.create_audio":         [.appleScript, .accessibility],
+        "track.create_instrument":    [.appleScript, .accessibility],
+        "track.create_drummer":       [.appleScript, .accessibility],
         "track.create_external_midi": [.cgEvent, .accessibility],
         "track.delete":               [.cgEvent, .accessibility],
         "track.rename":               [.accessibility],

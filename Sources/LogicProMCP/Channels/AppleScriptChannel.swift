@@ -42,6 +42,20 @@ actor AppleScriptChannel: Channel {
         case "transport.pause":
             return await runScript(transportScript(action: "pause"))
 
+        // Track creation via Track menu clicks.
+        // Modern Logic Pro (11+) menu item names change with Session Player
+        // features, so menu clicks are more reliable than shortcut approximations.
+        case "track.create_audio":
+            return await runScript(trackMenuClickScript(menuItem: "New Audio Track"))
+        case "track.create_instrument":
+            return await runScript(trackMenuClickScript(menuItem: "New Software Instrument Track"))
+        case "track.create_drummer":
+            // Logic Pro 11+ merged Drummer into Session Player; the menu item
+            // is "New Session Player SI Track…" (note: horizontal ellipsis U+2026,
+            // not three periods). This opens a dialog where the user picks
+            // Drummer/Bass/Keys.
+            return await runScript(trackMenuClickScript(menuItem: "New Session Player SI Track\u{2026}"))
+
         default:
             return .error("Unsupported AppleScript operation: \(operation)")
         }
@@ -129,6 +143,23 @@ actor AppleScriptChannel: Channel {
         """
         tell application "Logic Pro"
             \(action)
+        end tell
+        """
+    }
+
+    /// Click a menu item under the Track menu in Logic Pro's menu bar.
+    /// Used for track creation, which has unreliable keyboard shortcuts
+    /// (especially in Logic 11+ where Drummer is now under Session Player).
+    private func trackMenuClickScript(menuItem: String) -> String {
+        let escaped = menuItem.replacingOccurrences(of: "\"", with: "\\\"")
+        return """
+        tell application "Logic Pro"
+            activate
+        end tell
+        tell application "System Events"
+            tell process "Logic Pro"
+                click menu item "\(escaped)" of menu "Track" of menu bar 1
+            end tell
         end tell
         """
     }

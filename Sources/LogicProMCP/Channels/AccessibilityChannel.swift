@@ -194,10 +194,13 @@ actor AccessibilityChannel: Channel {
     }
 
     private func getSelectedTrack() -> ChannelResult {
+        // The track-level AXLayoutItem does not expose AXSelected; selection
+        // state lives on its child "Has Focus" AXRadioButton. Walk track
+        // headers and inspect that element to find the focused track.
         let headers = AXLogicProElements.allTrackHeaders()
         for (index, header) in headers.enumerated() {
-            if AXValueExtractors.extractSelectedState(header) == true {
-                let track = AXValueExtractors.extractTrackState(from: header, index: index)
+            let track = AXValueExtractors.extractTrackState(from: header, index: index)
+            if track.isSelected {
                 return encodeResult(track)
             }
         }
@@ -208,13 +211,18 @@ actor AccessibilityChannel: Channel {
         guard let indexStr = params["index"], let index = Int(indexStr) else {
             return .error("Missing or invalid 'index' parameter")
         }
-        guard let header = AXLogicProElements.findTrackHeader(at: index) else {
-            return .error("Track at index \(index) not found")
+        // Prefer pressing the "Has Focus" radio button (this is what Logic
+        // exposes as the selectable element). Fall back to pressing the
+        // track's AXLayoutItem container if the radio button isn't reachable.
+        if let focus = AXLogicProElements.findTrackFocusElement(trackIndex: index),
+           AXHelpers.performAction(focus, kAXPressAction) {
+            return .success("{\"selected\":\(index)}")
         }
-        guard AXHelpers.performAction(header, kAXPressAction) else {
-            return .error("Failed to select track \(index)")
+        if let header = AXLogicProElements.findTrackHeader(at: index),
+           AXHelpers.performAction(header, kAXPressAction) {
+            return .success("{\"selected\":\(index)}")
         }
-        return .success("{\"selected\":\(index)}")
+        return .error("Failed to select track \(index)")
     }
 
     private func setTrackToggle(params: [String: String], button buttonName: String) -> ChannelResult {

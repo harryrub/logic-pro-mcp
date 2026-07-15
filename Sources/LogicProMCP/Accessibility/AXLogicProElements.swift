@@ -12,8 +12,25 @@ enum AXLogicProElements {
     }
 
     /// Get the main window element.
+    ///
+    /// Prefers Logic's standard arrange window (subrole = AXStandardWindow) over
+    /// whatever AX reports as the "main" window. AX's main-window attribute can
+    /// point at a modal dialog (e.g. "Import", "Save As") when one is open,
+    /// which will shadow the real arrange hierarchy and break track enumeration.
     static func mainWindow() -> AXUIElement? {
         guard let app = appRoot() else { return nil }
+        // Scan all app windows and prefer the standard arrange window.
+        if let windows: CFArray = AXHelpers.getAttribute(app, kAXWindowsAttribute) {
+            for i in 0..<CFArrayGetCount(windows) {
+                let ptr = CFArrayGetValueAtIndex(windows, i)
+                let win = unsafeBitCast(ptr, to: AXUIElement.self)
+                let subrole: String? = AXHelpers.getAttribute(win, kAXSubroleAttribute)
+                if subrole == "AXStandardWindow" {
+                    return win
+                }
+            }
+        }
+        // Fallback to AX's main window if we couldn't pick a standard one.
         return AXHelpers.getAttribute(app, kAXMainWindowAttribute)
     }
 
@@ -50,31 +67,53 @@ enum AXLogicProElements {
     // MARK: - Tracks
 
     /// Find the track header area containing individual track rows.
+    ///
+    /// In Logic Pro 11, the arrange window's track list lives in an `AXGroup`
+    /// whose `AXDescription` is literally `"Tracks header"`. Each child of that
+    /// group is an `AXLayoutItem` with description of the form
+    /// `Track 1 "Kick"` — one per track visible in the arrange area.
+    ///
+    /// Previous implementations fell back to the first `AXOutline` / `AXList`
+    /// in the window, which picked up the Library browser or the Region
+    /// Inspector panel instead of the real track list. The Inspector's rows
+    /// show labels like `Mute:`, `Loop:`, `Quantize:`, `Q-Swing:`, etc., which
+    /// is exactly what was leaking through as track "names".
     static func getTrackHeaders() -> AXUIElement? {
         guard let window = mainWindow() else { return nil }
-        // Track headers are typically in a scrollable list/table area
-        if let area = AXHelpers.findDescendant(of: window, role: kAXListRole, identifier: "Track Headers") {
-            return area
+        // Primary: find by the stable Apple-provided AXDescription "Tracks header".
+        if let group = findDescendantByDescription(
+            of: window, role: kAXGroupRole, description: "Tracks header", maxDepth: 10
+        ) {
+            return group
         }
-        // Fallback: look for an AXScrollArea containing AXRow or AXGroup children
-        if let area = AXHelpers.findDescendant(of: window, role: kAXScrollAreaRole, identifier: "Tracks") {
-            return area
+        // Fallback for Logic versions that might label differently: find any
+        // group whose direct children are AXLayoutItems with "Track N" descriptions.
+        if let group = findFirstGroupContainingTrackLayoutItems(of: window, maxDepth: 12) {
+            return group
         }
-        return AXHelpers.findDescendant(of: window, role: kAXOutlineRole, maxDepth: 5)
+        return nil
     }
 
     /// Find a track header at a specific index (0-based).
     static func findTrackHeader(at index: Int) -> AXUIElement? {
-        guard let headers = getTrackHeaders() else { return nil }
-        let rows = AXHelpers.getChildren(headers)
-        guard index >= 0 && index < rows.count else { return nil }
-        return rows[index]
+        let items = allTrackHeaders()
+        guard index >= 0 && index < items.count else { return nil }
+        return items[index]
     }
 
     /// Enumerate all track header rows.
+    ///
+    /// Returns only children that look like actual tracks (AXLayoutItem with
+    /// description prefix "Track "). This filters out any splitter/padding
+    /// siblings that occasionally appear inside the "Tracks header" group.
     static func allTrackHeaders() -> [AXUIElement] {
         guard let headers = getTrackHeaders() else { return [] }
-        return AXHelpers.getChildren(headers)
+        let children = AXHelpers.getChildren(headers)
+        return children.filter { child in
+            guard AXHelpers.getRole(child) == "AXLayoutItem" else { return false }
+            let desc = AXHelpers.getDescription(child) ?? ""
+            return desc.hasPrefix("Track ")
+        }
     }
 
     // MARK: - Mixer
@@ -161,43 +200,110 @@ enum AXLogicProElements {
 
     // MARK: - Track Controls
 
-    /// Find the mute button on a track header.
+    // Track headers expose mute/solo/arm/input-monitor as AXCheckBox children
+    // of the track's AXLayoutItem. Descriptions are fixed strings that Logic
+    // provides for VoiceOver: "Mute", "Solo", "Record Enable", "Input Monitoring".
+
+    /// Find the mute checkbox on a track header.
     static func findTrackMuteButton(trackIndex: Int) -> AXUIElement? {
         guard let header = findTrackHeader(at: trackIndex) else { return nil }
-        return findButtonByDescriptionPrefix(in: header, prefix: "Mute")
-            ?? AXHelpers.findDescendant(of: header, role: kAXButtonRole, title: "M")
+        return findCheckBoxByDescription(in: header, description: "Mute")
     }
 
-    /// Find the solo button on a track header.
+    /// Find the solo checkbox on a track header.
     static func findTrackSoloButton(trackIndex: Int) -> AXUIElement? {
         guard let header = findTrackHeader(at: trackIndex) else { return nil }
-        return findButtonByDescriptionPrefix(in: header, prefix: "Solo")
-            ?? AXHelpers.findDescendant(of: header, role: kAXButtonRole, title: "S")
+        return findCheckBoxByDescription(in: header, description: "Solo")
     }
 
-    /// Find the record-arm button on a track header.
+    /// Find the record-arm checkbox on a track header. Only audio / software
+    /// instrument tracks expose this; audio-only (playback) tracks don't.
     static func findTrackArmButton(trackIndex: Int) -> AXUIElement? {
         guard let header = findTrackHeader(at: trackIndex) else { return nil }
-        return findButtonByDescriptionPrefix(in: header, prefix: "Record")
-            ?? AXHelpers.findDescendant(of: header, role: kAXButtonRole, title: "R")
+        return findCheckBoxByDescription(in: header, description: "Record Enable")
     }
 
     /// Find the track name text field on a header.
+    /// Logic exposes the name as an `AXTextField` whose AXDescription is the
+    /// track's current display name. Returns the element for reading or editing.
     static func findTrackNameField(trackIndex: Int) -> AXUIElement? {
         guard let header = findTrackHeader(at: trackIndex) else { return nil }
-        return AXHelpers.findDescendant(of: header, role: kAXStaticTextRole, maxDepth: 4)
-            ?? AXHelpers.findDescendant(of: header, role: kAXTextFieldRole, maxDepth: 4)
+        return AXHelpers.findDescendant(of: header, role: kAXTextFieldRole, maxDepth: 3)
+    }
+
+    /// Find the "Has Focus" radio button that represents track selection state.
+    /// Each track layout item has one of these; its AXValue is 1 when the
+    /// track is selected in the arrange window.
+    static func findTrackFocusElement(trackIndex: Int) -> AXUIElement? {
+        guard let header = findTrackHeader(at: trackIndex) else { return nil }
+        let radios = AXHelpers.findAllDescendants(of: header, role: kAXRadioButtonRole, maxDepth: 2)
+        return radios.first { radio in
+            AXHelpers.getDescription(radio) == "Has Focus"
+        }
     }
 
     // MARK: - Helpers
 
-    private static func findButtonByDescriptionPrefix(
-        in element: AXUIElement, prefix: String
+    private static func findCheckBoxByDescription(
+        in element: AXUIElement, description: String
     ) -> AXUIElement? {
-        let buttons = AXHelpers.findAllDescendants(of: element, role: kAXButtonRole, maxDepth: 4)
-        return buttons.first { button in
-            guard let desc = AXHelpers.getDescription(button) else { return false }
-            return desc.hasPrefix(prefix)
+        // Track control checkboxes are direct children of the AXLayoutItem,
+        // so a shallow scan is enough and avoids picking up Inspector controls.
+        let boxes = AXHelpers.findAllDescendants(of: element, role: kAXCheckBoxRole, maxDepth: 2)
+        return boxes.first { box in
+            AXHelpers.getDescription(box) == description
         }
+    }
+
+    /// Recursive search for the first descendant whose role matches and whose
+    /// AXDescription equals the given string. Needed because `AXHelpers.findDescendant`
+    /// only matches on role/title/identifier, not description — and Logic's
+    /// "Tracks header" group is identified by description.
+    private static func findDescendantByDescription(
+        of element: AXUIElement,
+        role: String,
+        description: String,
+        maxDepth: Int
+    ) -> AXUIElement? {
+        guard maxDepth > 0 else { return nil }
+        for child in AXHelpers.getChildren(element) {
+            if AXHelpers.getRole(child) == role,
+               AXHelpers.getDescription(child) == description {
+                return child
+            }
+            if let found = findDescendantByDescription(
+                of: child, role: role, description: description, maxDepth: maxDepth - 1
+            ) {
+                return found
+            }
+        }
+        return nil
+    }
+
+    /// Fallback locator: DFS for the first AXGroup whose direct children
+    /// include at least one AXLayoutItem whose description starts with "Track ".
+    /// Used in case Logic renames the "Tracks header" group in a future version.
+    private static func findFirstGroupContainingTrackLayoutItems(
+        of element: AXUIElement, maxDepth: Int
+    ) -> AXUIElement? {
+        guard maxDepth > 0 else { return nil }
+        for child in AXHelpers.getChildren(element) {
+            if AXHelpers.getRole(child) == kAXGroupRole {
+                let grandKids = AXHelpers.getChildren(child)
+                let hasTracks = grandKids.contains { gc in
+                    AXHelpers.getRole(gc) == "AXLayoutItem"
+                        && (AXHelpers.getDescription(gc) ?? "").hasPrefix("Track ")
+                }
+                if hasTracks {
+                    return child
+                }
+            }
+            if let found = findFirstGroupContainingTrackLayoutItems(
+                of: child, maxDepth: maxDepth - 1
+            ) {
+                return found
+            }
+        }
+        return nil
     }
 }

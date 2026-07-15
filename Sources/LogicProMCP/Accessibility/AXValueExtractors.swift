@@ -85,12 +85,17 @@ enum AXValueExtractors {
     }
 
     /// Read a track header and extract its basic state.
+    ///
+    /// Expects `header` to be an AXLayoutItem from Logic's "Tracks header"
+    /// group — its own AXDescription is of the form `Track N "Name"` and its
+    /// children include AXCheckBox elements with descriptions "Mute", "Solo",
+    /// "Record Enable", "Input Monitoring" plus an AXRadioButton "Has Focus".
     static func extractTrackState(from header: AXUIElement, index: Int) -> TrackState {
         let name = extractTrackName(from: header)
-        let muted = extractTrackButtonState(from: header, prefix: "Mute") ?? false
-        let soloed = extractTrackButtonState(from: header, prefix: "Solo") ?? false
-        let armed = extractTrackButtonState(from: header, prefix: "Record") ?? false
-        let selected = extractSelectedState(header) ?? false
+        let muted = extractCheckBoxStateByDescription(from: header, description: "Mute") ?? false
+        let soloed = extractCheckBoxStateByDescription(from: header, description: "Solo") ?? false
+        let armed = extractCheckBoxStateByDescription(from: header, description: "Record Enable") ?? false
+        let selected = extractTrackSelection(from: header) ?? false
         let trackType = inferTrackType(from: header)
 
         return TrackState(
@@ -157,27 +162,73 @@ enum AXValueExtractors {
 
     // MARK: - Private helpers
 
+    /// Extract the track's display name from its AXLayoutItem.
+    ///
+    /// Priority:
+    /// 1. Parse the layout item's own AXDescription — Logic formats it as
+    ///    `Track N "Name"`. This is the most reliable source because it's set
+    ///    by Logic for VoiceOver and always reflects the visible name.
+    /// 2. Fall back to the embedded AXTextField's AXDescription (which also
+    ///    carries the name in current Logic versions).
+    /// 3. Fall back to the text field's AXValue.
     private static func extractTrackName(from header: AXUIElement) -> String {
-        // Try static text first
-        if let text = AXHelpers.findDescendant(of: header, role: kAXStaticTextRole, maxDepth: 3),
-           let name = extractTextValue(text), !name.isEmpty {
-            return name
+        if let desc = AXHelpers.getDescription(header),
+           let parsed = parseTrackDescription(desc) {
+            return parsed
         }
-        // Try text field
-        if let field = AXHelpers.findDescendant(of: header, role: kAXTextFieldRole, maxDepth: 3),
-           let name = extractTextValue(field), !name.isEmpty {
-            return name
+        if let field = AXHelpers.findDescendant(of: header, role: kAXTextFieldRole, maxDepth: 2) {
+            if let desc = AXHelpers.getDescription(field), !desc.isEmpty {
+                return desc
+            }
+            if let value = extractTextValue(field), !value.isEmpty {
+                return value
+            }
         }
         return AXHelpers.getTitle(header) ?? "Untitled"
     }
 
-    private static func extractTrackButtonState(from header: AXUIElement, prefix: String) -> Bool? {
-        let buttons = AXHelpers.findAllDescendants(of: header, role: kAXButtonRole, maxDepth: 4)
-        for button in buttons {
-            let desc = AXHelpers.getDescription(button) ?? AXHelpers.getTitle(button) ?? ""
-            if desc.hasPrefix(prefix) || desc.lowercased().contains(prefix.lowercased()) {
-                return extractButtonState(button)
-            }
+    /// Parse a layout-item description like `Track 12 "My Track"` and return
+    /// just the quoted name. Handles both straight (") and curly (“ ”) quotes
+    /// since Logic uses curly quotes in its AX descriptions.
+    private static func parseTrackDescription(_ desc: String) -> String? {
+        guard desc.hasPrefix("Track ") else { return nil }
+        // Look for curly-quote pair first, then straight quotes.
+        if let start = desc.firstIndex(of: "\u{201C}"),
+           let end = desc.lastIndex(of: "\u{201D}"),
+           start < end {
+            return String(desc[desc.index(after: start)..<end])
+        }
+        if let start = desc.firstIndex(of: "\""),
+           let end = desc.lastIndex(of: "\""),
+           start < end {
+            return String(desc[desc.index(after: start)..<end])
+        }
+        return nil
+    }
+
+    /// Read an AXCheckBox inside a track header by its AXDescription
+    /// (e.g. "Mute", "Solo", "Record Enable"). Returns true if the checkbox
+    /// is currently on. Shallow depth to avoid descending into Inspector rows
+    /// that happen to contain similarly-named labels.
+    private static func extractCheckBoxStateByDescription(
+        from header: AXUIElement, description: String
+    ) -> Bool? {
+        let boxes = AXHelpers.findAllDescendants(of: header, role: kAXCheckBoxRole, maxDepth: 2)
+        for box in boxes where AXHelpers.getDescription(box) == description {
+            if let state = extractCheckboxState(box) { return state }
+            if let state = extractButtonState(box) { return state }
+        }
+        return nil
+    }
+
+    /// Extract whether this track is the currently-selected (focused) track.
+    /// Logic puts a "Has Focus" AXRadioButton inside each track AXLayoutItem;
+    /// its AXValue is 1 when focused. We don't rely on AXSelected because the
+    /// AXLayoutItem itself doesn't expose selection state.
+    private static func extractTrackSelection(from header: AXUIElement) -> Bool? {
+        let radios = AXHelpers.findAllDescendants(of: header, role: kAXRadioButtonRole, maxDepth: 2)
+        for radio in radios where AXHelpers.getDescription(radio) == "Has Focus" {
+            if let state = extractButtonState(radio) { return state }
         }
         return nil
     }

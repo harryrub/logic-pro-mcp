@@ -157,6 +157,16 @@ Background Accessibility polling with adaptive intervals:
 
 Same 100+ operations. 90% less context.
 
+## MIDI routing not working?
+
+The server publishes a virtual MIDI source named **`LogicProMCP-Out`** (see `ServerConfig.virtualMIDISourceName`). Logic Pro should pick this up automatically, but if `logic_midi("send_note", ...)` runs without producing sound, Logic is most likely not listening to the virtual port yet. Work through these in order:
+
+1. **Start the MCP server *before* launching Logic Pro.** Logic scans for MIDI sources at startup; if the server isn't running yet, it won't see `LogicProMCP-Out`. If Logic is already open, quit and relaunch it after the server is running.
+2. **Enable the input in Logic's MIDI preferences.** Open **Logic Pro > Settings > MIDI > Inputs** and confirm the port named `LogicProMCP-Out` is present and enabled (checked). Toggle it off and on if it's stuck.
+3. **Select a Software Instrument track.** Logic only routes MIDI thru to the instrument on the *selected* track. A muted or unselected track produces no sound even if the MIDI data is arriving.
+
+If the port is missing from the list entirely, the server failed to create the virtual source — check the server logs for `MIDIEngine started` and any `sourceCreationFailed` errors.
+
 ## Limitations
 
 Logic Pro does not expose a programmatic API. This server works within macOS platform constraints:
